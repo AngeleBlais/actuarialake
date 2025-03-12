@@ -174,3 +174,5 @@ cython_debug/
 .pypirc
 /tokenized_train.csv
 /sample.txt
+
+awscliv2.zip
