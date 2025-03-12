@@ -1,0 +1,8 @@
+[core]
+    remote = localstack-s3
+['remote "localstack-s3"']
+    url = s3://raw
+    access_key_id = root
+    secret_access_key = root
+    endpointurl = http://localhost:4566
+

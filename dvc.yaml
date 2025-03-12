@@ -1,0 +1,31 @@
+stages:
+  unpack_raw:
+    cmd: >
+      python build/unpack_to_raw.py --input_dir ./data/raw --bucket_name raw --output_file_name combined_raw.csv
+    deps:
+      - src/unpack_data.py
+      - data/raw/train
+      - data/raw/test
+      - data/raw/dev
+    outs:
+      - s3://raw/combined_data.csv
+
+  preprocess:
+    cmd: >
+      python src/preprocess_to_staging.py --bucket_raw raw --bucket_staging staging --input_file combined_data.csv --output_prefix curated.wdi.csv
+    deps:
+      - src/preprocess_to_staging.py
+      - s3://raw/combined_data.csv
+    outs:
+      - s3://staging/train.csv
+      - s3://staging/dev.csv
+      - s3://staging/test.csv
+
+  process:
+    cmd: >
+      python src/process_to_curated.py --bucket_staging staging --bucket_curated curated --input_file test.csv --output_file gold_wdi.csv
+    deps:
+      - src/process_to_curated.py
+      - s3://staging/test.csv
+    outs:
+      - s3://curated/gold_wdi.csv
