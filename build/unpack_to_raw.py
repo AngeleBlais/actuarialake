@@ -24,9 +24,8 @@ def unpack_data(input_dir, bucket_name, output_file_name):
                 file_path= os.path.join(subfolder_path, file_name)
                 print(f"Reading {file_path}")
                 data = pd.read_csv(
-                    file_path,
-                    names=['sequence', 'family_accession', 'sequence_name', 'aligned_sequence', 'family_id']
-                )
+                    file_path                )
+                print(data.head(10))
                 data_frames.append(data)
         else:
             print(f"Subfolder {subfolder_path} does not exist or is not a directory.")
@@ -34,11 +33,10 @@ def unpack_data(input_dir, bucket_name, output_file_name):
     if data_frames:
         combined_data = pd.concat(data_frames, ignore_index=True)
         print("All files combined successfully.")
-
+        print(combined_data.head(10))
         combined_csv_path = f"{output_file_name}"  
         combined_data.to_csv(combined_csv_path, index=False)
         print(f"Combined file saved locally at {combined_csv_path}.")
-
         s3.upload_file(combined_csv_path, bucket_name, os.path.basename(output_file_name))
         print(f"Uploaded combined file to bucket '{bucket_name}' with name '{output_file_name}'.")
     else:

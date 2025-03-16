@@ -1,81 +1,102 @@
 import io
 import pandas as pd
 import boto3
-from transformers import AutoTokenizer
+import numpy as np
+from sklearn.preprocessing import StandardScaler
 
-    
-def tokenize_sequences(bucket_staging, bucket_curated, input_file, output_file, model_name="facebook/esm2_t6_8M_UR50D"):
+def curate_data(bucket_staging, bucket_curated, input_file, output_file):
     """
-    Tokenizes protein sequences from the staging bucket and uploads processed data to the curated bucket.
+    Transforme les données issues du bucket staging en un jeu de données "curated" en appliquant
+    une ingénierie de caractéristiques adaptée aux données (par exemple, de type actuariat).
 
-    Steps:
-    1. Downloads the staging data file from the staging bucket.
-    2. Tokenizes the 'sequence' column using a pre-trained tokenizer.
-    3. Stores tokenized sequences alongside other relevant columns.
-    4. Uploads the tokenized data to the curated bucket.
+    Étapes :
+      1. Télécharger le fichier depuis le bucket de staging.
+      2. Imputer les valeurs manquantes pour les colonnes numériques.
+      3. Supprimer la colonne 'Tarification' si elle est entièrement vide.
+      4. Calculer l'indicateur 'cost_ratio' = cout_tot / prime (en évitant la division par zéro).
+      5. Normaliser certaines variables numériques clés.
+      6. Construire une variable 'risk_score' en combinant cost_ratio (50%), WDI_Inflation_rate (30%)
+         et N_Inondation (20%).
+      7. Sauvegarder localement le fichier final et le téléverser dans le bucket curated.
 
-    Parameters:
-    bucket_staging (str): Name of the staging S3 bucket.
-    bucket_curated (str): Name of the curated S3 bucket.
-    input_file (str): Name of the input file in the staging bucket.
-    output_file (str): Name of the output file in the curated bucket.
-    model_name (str): Name of the Hugging Face model to use for tokenization.
+    Paramètres :
+      bucket_staging (str): Nom du bucket S3 de staging.
+      bucket_curated (str): Nom du bucket S3 curated.
+      input_file (str): Nom du fichier d'entrée dans le bucket de staging.
+      output_file (str): Nom du fichier de sortie dans le bucket curated.
     """
-    # Initialize S3 client
+    # Initialisation du client S3
     s3 = boto3.client('s3', endpoint_url='http://localhost:4566')
-
-    # Step 1: Download staging data
-    print(f"Downloading {input_file} from staging bucket...")
+    
+    # Étape 1 : Télécharger les données
+    print(f"Téléchargement de {input_file} depuis le bucket de staging...")
     response = s3.get_object(Bucket=bucket_staging, Key=input_file)
-
     data = pd.read_csv(io.BytesIO(response['Body'].read()))
-
-    # Ensure the 'sequence' column exists
-    if "sequence" not in data.columns:
-        raise ValueError("The input data must contain a 'sequence' column.")
-
-    # Step 2: Load tokenizer
-    print(f"Loading tokenizer for {model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    # Step 3: Tokenize sequences
-    print("Tokenizing sequences...")
-    tokenized_data = []
-    for sequence in data["sequence"]:
-        tokens = tokenizer(sequence, truncation=True, padding="max_length", max_length=1024, return_tensors="np")
-        tokenized_data.append(tokens["input_ids"][0])  # Extract token IDs as a flat array
-
-    # Convert tokenized data into a DataFrame
-    tokenized_df = pd.DataFrame(tokenized_data)
-    tokenized_df.columns = [f"token_{i}" for i in range(tokenized_df.shape[1])]
-
-    # Merge tokenized sequences with metadata
-    print("Merging tokenized sequences with metadata...")
-    metadata = data.drop(columns=["sequence"])  # Drop the original sequence column
-    processed_data = pd.concat([metadata, tokenized_df], axis=1)
-
-    # Step 4: Save processed data locally
+    print("Aperçu des données staging :")
+    print(data.head())
+    
+    # Étape 2 : Imputation des valeurs manquantes pour les colonnes numériques
+    numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+    # Conserver uniquement les colonnes numériques ayant au moins une valeur non nulle
+    numeric_cols = [col for col in numeric_cols if data[col].notna().sum() > 0]
+    for col in numeric_cols:
+        median_val = data[col].median()
+        # Si la médiane est NaN, on remplace par 0
+        data.loc[:, col] = data[col].fillna(median_val if not pd.isna(median_val) else 0)
+    
+    # Étape 3 : Supprimer la colonne 'Tarification' si elle est entièrement vide
+    if 'Tarification' in data.columns and data['Tarification'].isna().all():
+        data.drop(columns=['Tarification'], inplace=True)
+    
+    # Étape 4 : Calculer l'indicateur cost_ratio
+    data["cost_ratio"] = data.apply(lambda row: row["cout_tot"] / row["prime"] if row["prime"] != 0 else 0, axis=1)
+    
+    # Étape 5 : Normalisation des variables numériques clés
+    scaler = StandardScaler()
+    cols_to_scale = ["cout_tot", "prime", "N_Inondation", "WDI_GDP_per_capita", "WDI_Inflation_rate", "cost_ratio"]
+    cols_to_scale = [col for col in cols_to_scale if col in data.columns]
+    
+    data_scaled = data.copy()
+    for col in cols_to_scale:
+        # Si la colonne a plus d'une valeur unique, on la normalise
+        if data[col].nunique() > 1:
+            data_scaled[col] = scaler.fit_transform(data[[col]])
+        else:
+            data_scaled[col] = 0.0  # sinon, on attribue 0
+    
+    # Étape 6 : Calculer le risk_score (moyenne pondérée)
+    risk_score = np.zeros(len(data_scaled))
+    weight_total = 0
+    if "cost_ratio" in data_scaled.columns:
+        risk_score += 0.5 * data_scaled["cost_ratio"]
+        weight_total += 0.5
+    if "WDI_Inflation_rate" in data_scaled.columns:
+        risk_score += 0.3 * data_scaled["WDI_Inflation_rate"]
+        weight_total += 0.3
+    if "N_Inondation" in data_scaled.columns:
+        risk_score += 0.2 * data_scaled["N_Inondation"]
+        weight_total += 0.2
+    data_scaled["risk_score"] = risk_score / weight_total if weight_total != 0 else 0
+    
+    # Étape 7 : Sauvegarder localement le jeu de données curaté et le téléverser dans le bucket curated
     local_output_path = f"/tmp/{output_file}"
-    processed_data.to_csv(local_output_path, index=False)
-    print(f"Processed data saved locally at {local_output_path}.")
-
-    # Step 5: Upload to curated bucket
-    print(f"Uploading {output_file} to curated bucket...")
+    data_scaled.to_csv(local_output_path, index=False)
+    print(f"Jeu de données curaté sauvegardé localement à {local_output_path}.")
+    
+    print(f"Téléversement de {output_file} dans le bucket curated...")
     with open(local_output_path, "rb") as f:
         s3.upload_fileobj(f, bucket_curated, output_file)
     
-    print(f"Processed data successfully uploaded to curated bucket as {output_file}.")
+    print(f"Jeu de données curaté téléversé avec succès dans le bucket '{bucket_curated}' sous le nom '{output_file}'.")
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Process data from staging to curated bucket")
-    parser.add_argument("--bucket_staging", type=str, required=True, help="Name of the staging S3 bucket")
-    parser.add_argument("--bucket_curated", type=str, required=True, help="Name of the curated S3 bucket")
-    parser.add_argument("--input_file", type=str, required=True, help="Name of the input file in the staging bucket")
-    parser.add_argument("--output_file", type=str, required=True, help="Name of the output file in the curated bucket")
-    parser.add_argument("--model_name", type=str, default="facebook/esm2_t6_8M_UR50D", help="Tokenizer model name")
+    parser = argparse.ArgumentParser(description="Curate data from staging to curated bucket using feature engineering")
+    parser.add_argument("--bucket_staging", type=str, required=True, help="Nom du bucket S3 de staging")
+    parser.add_argument("--bucket_curated", type=str, required=True, help="Nom du bucket S3 curated")
+    parser.add_argument("--input_file", type=str, required=True, help="Nom du fichier d'entrée dans le bucket de staging")
+    parser.add_argument("--output_file", type=str, required=True, help="Nom du fichier de sortie dans le bucket curated")
     args = parser.parse_args()
 
-    tokenize_sequences(args.bucket_staging, args.bucket_curated, args.input_file, args.output_file, args.model_name)
-
+    curate_data(args.bucket_staging, args.bucket_curated, args.input_file, args.output_file)
