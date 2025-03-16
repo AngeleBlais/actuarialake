@@ -59,12 +59,24 @@ async def get_curated_data():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Point de terminaison de santé des services
+def check_bucket(bucket_name):
+    try:
+        s3_client.head_bucket(Bucket=bucket_name)
+        return "up"
+    except Exception:
+        return "down"
+
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
-
-# Point de terminaison pour les statistiques des buckets
+    bucket_statuses = {name: check_bucket(bucket) for name, bucket in [raw_bucket,staging_bucket,curated_bucket].items()}
+    
+    # Vérifie si un bucket est en panne
+    overall_status = "healthy" if all(status == "up" for status in bucket_statuses.values()) else "degraded"
+    
+    return {
+        "status": overall_status,
+        "buckets": bucket_statuses
+    }
 @app.get("/stats")
 async def stats():
     try:
